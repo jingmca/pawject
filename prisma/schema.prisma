@@ -1,0 +1,91 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  description String   @default("")
+  instruction String   @default("")
+  feishuLink  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tasks    Task[]
+  context  ContextItem[]
+  outputs  OutputArtifact[]
+}
+
+model Task {
+  id             String   @id @default(cuid())
+  projectId      String
+  name           String
+  description    String   @default("")
+  type           String   @default("one_time") // periodic | one_time | long_term
+  status         String   @default("pending")  // pending | running | paused | stopped | completed | error | awaiting_input
+  scheduleConfig String?  // JSON string for periodic config
+  nextRunAt      DateTime?
+  lastRunAt      DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  project  Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  messages Message[]
+  outputs  OutputArtifact[]
+
+  @@index([projectId])
+  @@index([status])
+  @@index([nextRunAt])
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  taskId    String
+  role      String   // user | agent | system
+  content   String
+  metadata  String?  // JSON string
+  createdAt DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+}
+
+model ContextItem {
+  id        String   @id @default(cuid())
+  projectId String
+  name      String
+  type      String   // file | url | feishu_folder | text_note
+  content   String
+  metadata  String?  // JSON string
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+}
+
+model OutputArtifact {
+  id        String   @id @default(cuid())
+  projectId String
+  taskId    String?
+  name      String
+  type      String   // report | document | data | code | other
+  content   String
+  summary   String?
+  metadata  String?  // JSON string
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task    Task?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([taskId])
+}
