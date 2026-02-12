@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { executePeriodicRun, generateProgressUpdate } from "@/lib/agent";
+import { getWorkspacePath, commitChange } from "@/lib/workspace";
 import type { ScheduleConfig } from "@/types";
 
 export async function checkAndRunScheduledTasks(): Promise<{
@@ -9,8 +10,9 @@ export async function checkAndRunScheduledTasks(): Promise<{
   let periodicRan = 0;
   let progressUpdates = 0;
 
-  // 1. Check periodic tasks that are due
   const now = new Date();
+
+  // 1. Check periodic tasks that are due
   const periodicTasks = await prisma.task.findMany({
     where: {
       type: "periodic",
@@ -24,13 +26,24 @@ export async function checkAndRunScheduledTasks(): Promise<{
 
   for (const task of periodicTasks) {
     try {
+      await prisma.message.create({
+        data: {
+          taskId: task.id,
+          role: "system",
+          content: `定期执行触发 (${new Date().toLocaleString("zh-CN")})`,
+        },
+      });
+
+      const workspacePath =
+        task.project.workspacePath || getWorkspacePath(task.projectId);
+
       const response = await executePeriodicRun(
         task,
         task.project.context,
-        task.project.instruction
+        task.project.instruction,
+        workspacePath
       );
 
-      // Save agent message
       await prisma.message.create({
         data: {
           taskId: task.id,
@@ -39,7 +52,6 @@ export async function checkAndRunScheduledTasks(): Promise<{
         },
       });
 
-      // Save artifacts
       if (response.artifacts) {
         for (const artifact of response.artifacts) {
           await prisma.outputArtifact.create({
@@ -54,6 +66,9 @@ export async function checkAndRunScheduledTasks(): Promise<{
           });
         }
       }
+
+      // Commit workspace changes
+      await commitChange(task.projectId, `Periodic: ${task.name}`);
 
       // Calculate next run
       let nextRunAt: Date | null = null;
@@ -80,18 +95,22 @@ export async function checkAndRunScheduledTasks(): Promise<{
       periodicRan++;
     } catch (error) {
       console.error(`Periodic task ${task.id} failed:`, error);
-      await prisma.task.update({
-        where: { id: task.id },
-        data: { status: "error" },
+      const errMsg = error instanceof Error ? error.message : String(error);
+      await prisma.message.create({
+        data: {
+          taskId: task.id,
+          role: "system",
+          content: `定期执行出错：${errMsg}`,
+        },
       });
     }
   }
 
-  // 2. Check long-term tasks for progress updates (only if no recent messages)
+  // 2. Check proactive tasks for progress updates
   const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-  const longTermTasks = await prisma.task.findMany({
+  const proactiveTasks = await prisma.task.findMany({
     where: {
-      type: "long_term",
+      type: "proactive",
       status: "running",
     },
     include: {
@@ -100,23 +119,29 @@ export async function checkAndRunScheduledTasks(): Promise<{
     },
   });
 
-  for (const task of longTermTasks) {
+  for (const task of proactiveTasks) {
     const lastMessage = task.messages[0];
     if (lastMessage && lastMessage.createdAt > oneHourAgo) {
-      continue; // Skip if there was recent activity
+      continue;
     }
 
     try {
-      const history = await prisma.message.findMany({
-        where: { taskId: task.id },
-        orderBy: { createdAt: "asc" },
+      await prisma.message.create({
+        data: {
+          taskId: task.id,
+          role: "system",
+          content: `阶段性进展更新 (${new Date().toLocaleString("zh-CN")})`,
+        },
       });
+
+      const workspacePath =
+        task.project.workspacePath || getWorkspacePath(task.projectId);
 
       const response = await generateProgressUpdate(
         task,
-        history,
         task.project.context,
-        task.project.instruction
+        task.project.instruction,
+        workspacePath
       );
 
       await prisma.message.create({
@@ -142,6 +167,9 @@ export async function checkAndRunScheduledTasks(): Promise<{
         }
       }
 
+      // Commit workspace changes
+      await commitChange(task.projectId, `Progress: ${task.name}`);
+
       if (response.taskStatusChange) {
         await prisma.task.update({
           where: { id: task.id },
@@ -151,7 +179,15 @@ export async function checkAndRunScheduledTasks(): Promise<{
 
       progressUpdates++;
     } catch (error) {
-      console.error(`Long-term task ${task.id} update failed:`, error);
+      console.error(`Proactive task ${task.id} update failed:`, error);
+      const errMsg = error instanceof Error ? error.message : String(error);
+      await prisma.message.create({
+        data: {
+          taskId: task.id,
+          role: "system",
+          content: `进展更新出错：${errMsg}`,
+        },
+      });
     }
   }
 

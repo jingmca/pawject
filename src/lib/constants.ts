@@ -1,17 +1,14 @@
 export const TASK_TYPE_LABELS: Record<string, string> = {
   periodic: "周期任务",
   one_time: "一次性任务",
-  long_term: "长期任务",
+  proactive: "主动探索",
 };
 
 export const TASK_STATUS_LABELS: Record<string, string> = {
-  pending: "待执行",
-  running: "运行中",
-  paused: "已暂停",
-  stopped: "已停止",
-  completed: "已完成",
-  error: "错误",
-  awaiting_input: "等待输入",
+  pending: "待启动",
+  running: "进行中",
+  completed: "已执行",
+  awaiting_input: "待你处理",
 };
 
 export const CONTEXT_TYPE_LABELS: Record<string, string> = {

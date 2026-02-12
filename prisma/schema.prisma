@@ -8,13 +8,14 @@ datasource db {
 }
 
 model Project {
-  id          String   @id @default(cuid())
-  name        String
-  description String   @default("")
-  instruction String   @default("")
-  feishuLink  String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id            String   @id @default(cuid())
+  name          String
+  description   String   @default("")
+  instruction   String   @default("")
+  feishuLink    String?
+  workspacePath String   @default("")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   tasks    Task[]
   context  ContextItem[]
@@ -26,8 +27,9 @@ model Task {
   projectId      String
   name           String
   description    String   @default("")
-  type           String   @default("one_time") // periodic | one_time | long_term
-  status         String   @default("pending")  // pending | running | paused | stopped | completed | error | awaiting_input
+  type           String   @default("one_time") // periodic | one_time | proactive
+  status         String   @default("pending")  // pending | running | completed | awaiting_input
+  sessionId      String?  // Claude Code session UUID
   scheduleConfig String?  // JSON string for periodic config
   nextRunAt      DateTime?
   lastRunAt      DateTime?

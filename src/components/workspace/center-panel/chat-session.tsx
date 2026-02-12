@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useMessagesStore } from "@/stores/messages-store";
 import { ChatMessage } from "./chat-message";
@@ -13,18 +13,32 @@ interface ChatSessionProps {
 }
 
 export function ChatSession({ task }: ChatSessionProps) {
-  const { messagesByTask, fetchMessages, isStreaming, streamingContent } =
+  const { messagesByTask, fetchMessages, isStreaming, streamingTaskId, streamingContent } =
     useMessagesStore();
   const messages = messagesByTask[task.id] || [];
   const scrollRef = useRef<HTMLDivElement>(null);
-  const loadedRef = useRef<string | null>(null);
+  const isThisTaskStreaming = isStreaming && streamingTaskId === task.id;
 
-  useEffect(() => {
-    if (loadedRef.current !== task.id) {
-      loadedRef.current = task.id;
-      fetchMessages(task.id);
-    }
+  const refreshMessages = useCallback(() => {
+    fetchMessages(task.id);
   }, [task.id, fetchMessages]);
+
+  // Fetch messages on mount and when task changes
+  useEffect(() => {
+    refreshMessages();
+  }, [refreshMessages]);
+
+  // Poll for new messages every 10s for active tasks (periodic/long_term get scheduler updates)
+  useEffect(() => {
+    if (!["running", "awaiting_input"].includes(task.status)) return;
+    if (isThisTaskStreaming) return;
+
+    const interval = setInterval(() => {
+      refreshMessages();
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [task.id, task.status, isThisTaskStreaming, refreshMessages]);
 
   // Auto-scroll on new messages or streaming
   useEffect(() => {
@@ -39,7 +53,7 @@ export function ChatSession({ task }: ChatSessionProps) {
     <div className="flex-1 flex flex-col min-h-0">
       <ScrollArea className="flex-1" ref={scrollRef}>
         <div className="p-4 space-y-4">
-          {messages.length === 0 && !isStreaming && (
+          {messages.length === 0 && !isThisTaskStreaming && (
             <div className="flex justify-center py-8">
               <Skeleton className="h-16 w-64 rounded-lg" />
             </div>
@@ -47,7 +61,7 @@ export function ChatSession({ task }: ChatSessionProps) {
           {messages.map((msg) => (
             <ChatMessage key={msg.id} message={msg} />
           ))}
-          {isStreaming && streamingContent && (
+          {isThisTaskStreaming && streamingContent && (
             <ChatMessage
               message={{
                 id: "streaming",
@@ -63,7 +77,7 @@ export function ChatSession({ task }: ChatSessionProps) {
         </div>
       </ScrollArea>
 
-      <ChatInput taskId={task.id} disabled={!isTaskActive || isStreaming} />
+      <ChatInput taskId={task.id} disabled={isThisTaskStreaming} />
     </div>
   );
 }

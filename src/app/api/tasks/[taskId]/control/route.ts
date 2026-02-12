@@ -13,49 +13,23 @@ export async function POST(
     return NextResponse.json({ error: "Task not found" }, { status: 404 });
   }
 
-  let newStatus: string;
+  if (action !== "stop") {
+    return NextResponse.json(
+      { error: "Invalid action. Only 'stop' is supported." },
+      { status: 400 }
+    );
+  }
 
-  switch (action) {
-    case "pause":
-      if (task.status !== "running") {
-        return NextResponse.json(
-          { error: "Can only pause running tasks" },
-          { status: 400 }
-        );
-      }
-      newStatus = "paused";
-      break;
-
-    case "resume":
-      if (task.status !== "paused") {
-        return NextResponse.json(
-          { error: "Can only resume paused tasks" },
-          { status: 400 }
-        );
-      }
-      newStatus = "running";
-      break;
-
-    case "stop":
-      if (!["running", "paused", "awaiting_input"].includes(task.status)) {
-        return NextResponse.json(
-          { error: "Task cannot be stopped in current state" },
-          { status: 400 }
-        );
-      }
-      newStatus = "stopped";
-      break;
-
-    default:
-      return NextResponse.json(
-        { error: "Invalid action. Use: pause, resume, stop" },
-        { status: 400 }
-      );
+  if (!["running", "awaiting_input", "pending"].includes(task.status)) {
+    return NextResponse.json(
+      { error: "Task cannot be stopped in current state" },
+      { status: 400 }
+    );
   }
 
   const updated = await prisma.task.update({
     where: { id: taskId },
-    data: { status: newStatus },
+    data: { status: "completed" },
   });
 
   // Add system message about status change
@@ -63,7 +37,7 @@ export async function POST(
     data: {
       taskId,
       role: "system",
-      content: `任务状态变更为：${newStatus}`,
+      content: `Task stopped and marked as completed.`,
     },
   });
 

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { chatStream } from "@/lib/agent";
+import { chatStream, parseClaudeResult, ensureClaudeMd } from "@/lib/agent";
+import { commitChange, getWorkspacePath } from "@/lib/workspace";
 
 export async function GET(request: NextRequest) {
   const taskId = request.nextUrl.searchParams.get("taskId");
@@ -47,102 +48,187 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Task not found" }, { status: 404 });
   }
 
-  // Load message history
-  const messageHistory = await prisma.message.findMany({
-    where: { taskId },
-    orderBy: { createdAt: "asc" },
+  // Resume task to running if not already
+  if (task.status !== "running") {
+    await prisma.task.update({
+      where: { id: taskId },
+      data: { status: "running" },
+    });
+  }
+
+  const workspacePath = getWorkspacePath(task.projectId);
+
+  // Write CLAUDE.md with system prompt before starting the CLI
+  await ensureClaudeMd(
+    task,
+    task.project.instruction,
+    task.project.context,
+    workspacePath,
+    task.projectId
+  );
+
+  // Check if agent has previously replied in this task (determines -c flag)
+  const agentMessageCount = await prisma.message.count({
+    where: { taskId, role: "agent" },
   });
+  const hasAgentReplied = agentMessageCount > 0;
 
   // Create SSE stream
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
     async start(controller) {
+      let closed = false;
+      const safeEnqueue = (data: Uint8Array) => {
+        if (!closed) {
+          try { controller.enqueue(data); } catch { /* controller already closed */ }
+        }
+      };
+      const safeClose = () => {
+        if (!closed) {
+          closed = true;
+          try { controller.close(); } catch { /* already closed */ }
+        }
+      };
+
       try {
-        const generator = chatStream({
+        const { done } = chatStream({
           task,
           userMessage: content,
-          messageHistory,
           sharedContext: task.project.context,
           projectInstruction: task.project.instruction,
-        });
+          workspacePath,
+          hasAgentReplied,
+          callbacks: {
+            onToken: (text) => {
+              safeEnqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ type: "delta", content: text })}\n\n`
+                )
+              );
+            },
+            onResult: async (result) => {
+              try {
+                const agentResponse = parseClaudeResult(result);
 
-        let fullContent = "";
-        let result = await generator.next();
+                // Build agent content, appending askUser question if present
+                const agentContent = agentResponse.askUser
+                  ? (agentResponse.content ? agentResponse.content + "\n\n" : "") +
+                    `[ASK_USER: ${agentResponse.askUser}]`
+                  : agentResponse.content;
 
-        while (!result.done) {
-          const chunk = result.value as string;
-          fullContent += chunk;
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify({ type: "delta", content: chunk })}\n\n`)
-          );
-          result = await generator.next();
-        }
+                // Save agent message with metadata for askUser
+                const messageData: {
+                  taskId: string;
+                  role: string;
+                  content: string;
+                  metadata?: string;
+                } = {
+                  taskId,
+                  role: "agent",
+                  content: agentContent,
+                };
 
-        // result.value is the parsed AgentResponse
-        const agentResponse = result.value;
+                if (agentResponse.askUser) {
+                  messageData.metadata = JSON.stringify({
+                    askUser: agentResponse.askUser,
+                  });
+                }
 
-        // Save agent message
-        const agentMessage = await prisma.message.create({
-          data: {
-            taskId,
-            role: "agent",
-            content: agentResponse.content,
+                const agentMessage = await prisma.message.create({
+                  data: messageData,
+                });
+
+                // Handle artifacts
+                if (agentResponse.artifacts) {
+                  for (const artifact of agentResponse.artifacts) {
+                    await prisma.outputArtifact.create({
+                      data: {
+                        projectId: task.projectId,
+                        taskId,
+                        name: artifact.name,
+                        type: artifact.type,
+                        content: artifact.content,
+                        summary: artifact.summary,
+                      },
+                    });
+                  }
+                }
+
+                // Handle status change (askUser -> awaiting_input)
+                if (agentResponse.taskStatusChange) {
+                  await prisma.task.update({
+                    where: { id: taskId },
+                    data: { status: agentResponse.taskStatusChange },
+                  });
+                }
+
+                // Update task's sessionId if Claude result includes one and task doesn't have it yet
+                if (agentResponse.sessionId && !task.sessionId) {
+                  await prisma.task.update({
+                    where: { id: taskId },
+                    data: { sessionId: agentResponse.sessionId },
+                  });
+                }
+
+                // Commit workspace changes
+                await commitChange(
+                  task.projectId,
+                  `Agent: ${task.name}`
+                );
+
+                // Send completion event
+                safeEnqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "done",
+                      messageId: agentMessage.id,
+                      taskStatusChange: agentResponse.taskStatusChange,
+                      artifacts: agentResponse.artifacts,
+                      askUser: agentResponse.askUser,
+                    })}\n\n`
+                  )
+                );
+              } catch (err) {
+                const errMsg =
+                  err instanceof Error ? err.message : String(err);
+                console.error("Error processing result:", err);
+                safeEnqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({ type: "error", error: errMsg })}\n\n`
+                  )
+                );
+              }
+            },
           },
         });
 
-        // Handle artifacts
-        if (agentResponse.artifacts) {
-          for (const artifact of agentResponse.artifacts) {
-            await prisma.outputArtifact.create({
-              data: {
-                projectId: task.projectId,
-                taskId,
-                name: artifact.name,
-                type: artifact.type,
-                content: artifact.content,
-                summary: artifact.summary,
-              },
-            });
-          }
-        }
-
-        // Handle status change
-        if (agentResponse.taskStatusChange) {
-          await prisma.task.update({
-            where: { id: taskId },
-            data: { status: agentResponse.taskStatusChange },
-          });
-        }
-
-        // Ensure running status if task was awaiting input
-        if (task.status === "awaiting_input") {
-          await prisma.task.update({
-            where: { id: taskId },
-            data: { status: "running" },
-          });
-        }
-
-        // Send completion event
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              type: "done",
-              messageId: agentMessage.id,
-              taskStatusChange: agentResponse.taskStatusChange,
-              artifacts: agentResponse.artifacts,
-            })}\n\n`
-          )
-        );
+        // Wait for the Claude process to complete
+        await done;
       } catch (error) {
+        // Agent execution failed -- save error to conversation and mark task
+        const errMsg = error instanceof Error ? error.message : String(error);
         console.error("Stream error:", error);
-        controller.enqueue(
+
+        await prisma.message.create({
+          data: {
+            taskId,
+            role: "system",
+            content: `Agent execution error: ${errMsg}`,
+          },
+        });
+        await prisma.task.update({
+          where: { id: taskId },
+          data: { status: "completed" },
+        });
+
+        safeEnqueue(
           encoder.encode(
-            `data: ${JSON.stringify({ type: "error", error: "Agent response failed" })}\n\n`
+            `data: ${JSON.stringify({ type: "error", error: errMsg })}\n\n`
           )
         );
       } finally {
-        controller.close();
+        safeClose();
       }
     },
   });

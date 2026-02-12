@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { chat } from "@/lib/agent";
+import { getWorkspacePath, commitChange } from "@/lib/workspace";
 import type { ScheduleConfig } from "@/types";
+import crypto from "node:crypto";
 
 export async function GET(request: NextRequest) {
   const projectId = request.nextUrl.searchParams.get("projectId");
@@ -21,6 +23,104 @@ export async function GET(request: NextRequest) {
   });
 
   return NextResponse.json(tasks);
+}
+
+// Background agent execution for new tasks -- not awaited by the request
+async function runInitialTaskAgent(
+  projectId: string,
+  taskId: string,
+  taskName: string,
+  taskType: string,
+  userMsg: string
+) {
+  try {
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      include: { context: true },
+    });
+
+    if (!project) return;
+
+    const task = await prisma.task.findUnique({ where: { id: taskId } });
+    if (!task) return;
+
+    const workspacePath = getWorkspacePath(projectId);
+
+    const response = await chat({
+      task,
+      userMessage: userMsg,
+      sharedContext: project.context,
+      projectInstruction: project.instruction,
+      workspacePath,
+    });
+
+    // Save agent response
+    const messageData: {
+      taskId: string;
+      role: string;
+      content: string;
+      metadata?: string;
+    } = {
+      taskId,
+      role: "agent",
+      content: response.content,
+    };
+
+    if (response.askUser) {
+      messageData.metadata = JSON.stringify({ askUser: response.askUser });
+    }
+
+    await prisma.message.create({ data: messageData });
+
+    // Save artifacts
+    if (response.artifacts) {
+      for (const artifact of response.artifacts) {
+        await prisma.outputArtifact.create({
+          data: {
+            projectId,
+            taskId,
+            name: artifact.name,
+            type: artifact.type,
+            content: artifact.content,
+            summary: artifact.summary,
+          },
+        });
+      }
+    }
+
+    // Update status if agent suggested a change
+    if (response.taskStatusChange) {
+      await prisma.task.update({
+        where: { id: taskId },
+        data: { status: response.taskStatusChange },
+      });
+    }
+
+    // Update task's sessionId if returned
+    if (response.sessionId && !task.sessionId) {
+      await prisma.task.update({
+        where: { id: taskId },
+        data: { sessionId: response.sessionId },
+      });
+    }
+
+    // Commit workspace changes
+    await commitChange(projectId, `Agent: ${taskName}`);
+  } catch (error) {
+    console.error("Background task agent execution failed:", error);
+    const errMsg = error instanceof Error ? error.message : String(error);
+    await prisma.message.create({
+      data: {
+        taskId,
+        role: "system",
+        content: `Agent execution error: ${errMsg}`,
+      },
+    });
+    await prisma.task.update({
+      where: { id: taskId },
+      data: { status: "completed" },
+    });
+  }
 }
 
 export async function POST(request: Request) {
@@ -48,9 +148,12 @@ export async function POST(request: Request) {
     } catch {
       // invalid config
     }
-  } else if (type === "one_time" || type === "long_term") {
+  } else if (type === "one_time" || type === "proactive") {
     status = "running";
   }
+
+  // Generate a sessionId for the task
+  const sessionId = crypto.randomUUID();
 
   const task = await prisma.task.create({
     data: {
@@ -59,93 +162,43 @@ export async function POST(request: Request) {
       description: description || "",
       type,
       status,
+      sessionId,
       scheduleConfig: scheduleConfig || null,
       nextRunAt,
     },
   });
 
-  // Auto-generate initial agent message for running tasks
+  // Save initial messages synchronously so they show up immediately, then run agent in background
   if (status === "running") {
-    try {
-      const project = await prisma.project.findUnique({
-        where: { id: projectId },
-        include: { context: true },
-      });
+    const initialMessages: Record<string, string> = {
+      one_time: `Please start executing task "${name}". ${description || ""}`,
+      proactive: `Please start tracking goal "${name}" and provide initial analysis. ${description || ""}`,
+      periodic: `Task "${name}" has been created. Please confirm configuration and prepare for first execution.`,
+    };
 
-      if (project) {
-        const initialMessages: Record<string, string> = {
-          one_time: `请开始执行任务「${name}」。${description || ""}`,
-          long_term: `请开始跟踪目标「${name}」，并提供初始分析。${description || ""}`,
-          periodic: `任务「${name}」已创建。请确认任务配置并准备首次执行。`,
-        };
+    const userMsg = initialMessages[type] || initialMessages.one_time;
 
-        const userMsg = initialMessages[type] || initialMessages.one_time;
+    await prisma.message.create({
+      data: {
+        taskId: task.id,
+        role: "system",
+        content: `Task created: ${name} (${type})`,
+      },
+    });
 
-        // Save system init message
-        await prisma.message.create({
-          data: {
-            taskId: task.id,
-            role: "system",
-            content: `任务已创建：${name} (${type})`,
-          },
-        });
+    await prisma.message.create({
+      data: {
+        taskId: task.id,
+        role: "user",
+        content: userMsg,
+      },
+    });
 
-        const response = await chat({
-          task,
-          userMessage: userMsg,
-          messageHistory: [],
-          sharedContext: project.context,
-          projectInstruction: project.instruction,
-        });
-
-        // Save user trigger and agent response
-        await prisma.message.create({
-          data: {
-            taskId: task.id,
-            role: "user",
-            content: userMsg,
-          },
-        });
-
-        await prisma.message.create({
-          data: {
-            taskId: task.id,
-            role: "agent",
-            content: response.content,
-          },
-        });
-
-        // Save artifacts
-        if (response.artifacts) {
-          for (const artifact of response.artifacts) {
-            await prisma.outputArtifact.create({
-              data: {
-                projectId,
-                taskId: task.id,
-                name: artifact.name,
-                type: artifact.type,
-                content: artifact.content,
-                summary: artifact.summary,
-              },
-            });
-          }
-        }
-
-        // Update status if agent suggested a change
-        if (response.taskStatusChange) {
-          await prisma.task.update({
-            where: { id: task.id },
-            data: { status: response.taskStatusChange },
-          });
-        }
-      }
-    } catch (error) {
-      console.error("Failed to generate initial agent message:", error);
-      // Task is still created, just without initial message
-    }
+    // Fire and forget -- don't await
+    runInitialTaskAgent(projectId, task.id, name, type, userMsg);
   }
 
-  // Return fresh task data
+  // Return immediately
   const updatedTask = await prisma.task.findUnique({
     where: { id: task.id },
     include: { _count: { select: { messages: true } } },

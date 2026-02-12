@@ -1,17 +1,14 @@
 export const TaskType = {
   PERIODIC: "periodic",
   ONE_TIME: "one_time",
-  LONG_TERM: "long_term",
+  PROACTIVE: "proactive",
 } as const;
 export type TaskType = (typeof TaskType)[keyof typeof TaskType];
 
 export const TaskStatus = {
   PENDING: "pending",
   RUNNING: "running",
-  PAUSED: "paused",
-  STOPPED: "stopped",
   COMPLETED: "completed",
-  ERROR: "error",
   AWAITING_INPUT: "awaiting_input",
 } as const;
 export type TaskStatus = (typeof TaskStatus)[keyof typeof TaskStatus];
@@ -48,14 +45,48 @@ export interface ScheduleConfig {
 export interface AgentResponse {
   content: string;
   taskStatusChange?: TaskStatus;
+  askUser?: string;
   artifacts?: Array<{
     name: string;
     type: string;
     content: string;
     summary: string;
   }>;
+  sessionId?: string;
+  costUsd?: number;
 }
 
 export interface TaskControlAction {
-  action: "pause" | "resume" | "stop";
+  action: "stop";
+}
+
+export interface FilePreviewTarget {
+  id: string;
+  name: string;
+  type: "context" | "draft";
+  content: string;
+  filePath?: string;
+  language?: string;
+}
+
+export interface AskUserQuery {
+  taskId: string;
+  taskName: string;
+  question: string;
+  messageId: string;
+  createdAt: Date;
+}
+
+export interface GraphEvent {
+  id: string;
+  type:
+    | "context_added"
+    | "draft_generated"
+    | "task_created"
+    | "task_completed"
+    | "ask_user";
+  label: string;
+  detail: string;
+  taskId?: string;
+  timestamp: Date;
 }

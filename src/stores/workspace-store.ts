@@ -1,30 +1,32 @@
 import { create } from "zustand";
+import type { FilePreviewTarget } from "@/types";
 
 interface WorkspaceState {
   selectedProjectId: string | null;
   selectedTaskId: string | null;
-  rightPanelOpen: boolean;
-  rightPanelTab: "context" | "output";
-  showNewTaskForm: boolean;
+  contributionsTab: "contributions" | "graph";
+  filePreviewOpen: boolean;
+  filePreviewTarget: FilePreviewTarget | null;
 
   setSelectedProjectId: (id: string | null) => void;
   setSelectedTaskId: (id: string | null) => void;
-  setRightPanelOpen: (open: boolean) => void;
-  setRightPanelTab: (tab: "context" | "output") => void;
-  setShowNewTaskForm: (show: boolean) => void;
+  setContributionsTab: (tab: "contributions" | "graph") => void;
+  openFilePreview: (target: FilePreviewTarget) => void;
+  closeFilePreview: () => void;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   selectedProjectId: null,
   selectedTaskId: null,
-  rightPanelOpen: true,
-  rightPanelTab: "context",
-  showNewTaskForm: false,
+  contributionsTab: "contributions",
+  filePreviewOpen: false,
+  filePreviewTarget: null,
 
   setSelectedProjectId: (id) => set({ selectedProjectId: id }),
-  setSelectedTaskId: (id) => set({ selectedTaskId: id, showNewTaskForm: false }),
-  setRightPanelOpen: (open) => set({ rightPanelOpen: open }),
-  setRightPanelTab: (tab) => set({ rightPanelTab: tab }),
-  setShowNewTaskForm: (show) =>
-    set({ showNewTaskForm: show, selectedTaskId: show ? null : undefined }),
+  setSelectedTaskId: (id) => set({ selectedTaskId: id }),
+  setContributionsTab: (tab) => set({ contributionsTab: tab }),
+  openFilePreview: (target) =>
+    set({ filePreviewOpen: true, filePreviewTarget: target }),
+  closeFilePreview: () =>
+    set({ filePreviewOpen: false, filePreviewTarget: null }),
 }));
