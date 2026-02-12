@@ -1,6 +1,109 @@
 # Agent Project System — 修改记录
 
-本文档记录了本次会话中对项目进行的全部设计变更和代码修改。
+本文档记录了对项目进行的全部设计变更和代码修改。
+
+---
+
+## 九、Task 子目录 + `--add-dir` + Draft 列表 + 状态修复
+
+### 9.1 问题背景
+
+| 问题 | 描述 |
+|------|------|
+| System Prompt 冲突 | 所有任务共享同一个 workspace 目录和 CLAUDE.md，并发任务互相覆盖 system prompt |
+| Draft 目录混杂 | `draft/` 目录混合所有任务的输出，无法区分来源 |
+| Draft 面板不完整 | "Agent Drafts" 面板只显示数据库 `OutputArtifact` 记录，遗漏 agent 直接写入磁盘的文件 |
+| 一次性任务不结束 | `parseClaudeResult` 只在 `[ASK_USER:]` 时设置 `taskStatusChange`，普通完成时状态不变 |
+
+### 9.2 Task 子目录设计
+
+每个任务在 `workspaces/{projectId}/tasks/{taskId}/` 下有独立的工作目录。
+
+**`src/lib/workspace.ts`** 新增：
+- `getTaskDir(projectId, taskId)` — 返回 `workspaces/{projectId}/tasks/{taskId}/`
+- `createTaskDir(projectId, taskId)` — 递归创建目录，返回路径
+- `listDraftFilesDetailed(projectId)` — 递归扫描 `draft/` 目录，返回文件详情数组
+
+### 9.3 CLAUDE.md 分层
+
+**`src/lib/agent.ts`** `ensureClaudeMd()` 函数新增 `taskDir` 参数：
+
+当 `taskDir` 存在时，写入两个文件：
+- **项目 CLAUDE.md**（`workspaces/{projectId}/CLAUDE.md`）：项目指令 + 共享上下文
+- **任务 CLAUDE.md**（`workspaces/{projectId}/tasks/{taskId}/CLAUDE.md`）：任务类型 prompt + 输出约定 + ASK_USER 格式
+
+当 `taskDir` 不存在时，回退为写入单个合并 CLAUDE.md（向后兼容）。
+
+### 9.4 `--add-dir` CLI 集成
+
+**`src/lib/claude-code.ts`** `claudeStream` / `claudeOneShot` 新增 `addDirs?: string[]` 参数：
+
+```typescript
+if (params.addDirs) {
+  for (const dir of params.addDirs) {
+    args.push("--add-dir", dir);
+  }
+}
+```
+
+`--add-dir` 标志在 `-c` 和 `-p` 之前插入。所有 API 路由传入 `addDirs = [contextDir, draftDir]`，让 CLI 以 task 子目录为 cwd 的同时能访问共享的 `context/` 和 `draft/` 目录。
+
+### 9.5 一次性任务自动完成
+
+三处 API 路由新增自动完成逻辑：
+
+**`src/app/api/projects/route.ts`** 和 **`src/app/api/tasks/route.ts`**：
+```typescript
+if (response.taskStatusChange) {
+  // 使用 agent 指定的状态（如 awaiting_input）
+} else if (task.type === "one_time") {
+  // 无 ASK_USER → 自动设为 completed
+  await prisma.task.update({ where: { id: taskId }, data: { status: "completed" } });
+}
+```
+
+**`src/app/api/messages/route.ts`** — 计算 `effectiveStatus` 并写入 SSE done 事件：
+```typescript
+const effectiveStatus = agentResponse.taskStatusChange
+  || (task.type === "one_time" ? "completed" : undefined);
+```
+
+### 9.6 Draft 文件列表 API + UI 合并
+
+**`src/app/api/drafts/route.ts`**（新建）：
+- `GET /api/drafts?projectId=...` 返回 `draft/` 目录下所有文件的 `{ name, relativePath, size, content, modifiedAt }`
+
+**`src/stores/outputs-store.ts`** 新增：
+- `draftFiles: DraftFile[]` 状态
+- `fetchDraftFiles(projectId)` action — 调用 `/api/drafts` 端点
+
+**`src/components/workspace/contributions-panel/contributions-tab.tsx`**：
+- `useEffect` 在 `projectId` 变化时拉取 draft 文件
+- `useMemo` 合并 DB 产出 + 文件系统 draft，按名称去重（DB 优先）
+- 文件系统产出显示 "file" 标签，不可删除
+
+### 9.7 测试
+
+新增 `tests/` 目录：
+- `tests/test-task-dirs.ts` — 74 项单元测试，覆盖目录结构、CLAUDE.md 拆分、--add-dir 参数、draft 列表、状态逻辑、UI 合并
+- `tests/test-api-integration.sh` — API 集成测试，验证完整的 project → task → draft 流程
+
+### 9.8 修改文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `src/lib/workspace.ts` | 新增 `getTaskDir`、`createTaskDir`、`listDraftFilesDetailed` |
+| `src/lib/claude-code.ts` | `claudeStream`/`claudeOneShot` 新增 `addDirs` 参数 |
+| `src/lib/agent.ts` | `ensureClaudeMd` 拆分 CLAUDE.md，所有函数新增 `addDirs`/`taskDir` |
+| `src/app/api/projects/route.ts` | task dir + addDirs + one_time 自动完成 |
+| `src/app/api/tasks/route.ts` | task dir + addDirs + one_time 自动完成 |
+| `src/app/api/messages/route.ts` | task dir + addDirs + effectiveStatus + SSE 事件 |
+| `src/lib/scheduler.ts` | task dir + addDirs |
+| `src/app/api/drafts/route.ts` | **新建** — GET 文件系统 draft 列表 |
+| `src/stores/outputs-store.ts` | 新增 `draftFiles` 状态 + `fetchDraftFiles` |
+| `src/components/.../contributions-tab.tsx` | DB+FS 合并展示、去重、useEffect + useMemo |
+| `tests/test-task-dirs.ts` | **新建** — 74 项单元测试 |
+| `tests/test-api-integration.sh` | **新建** — API 集成测试脚本 |
 
 ---
 

@@ -38,9 +38,11 @@
 **关键设计决策：**
 
 - **SSE 流式传输**：消息 API 使用 Server-Sent Events 将 Claude 的回复实时推送到前端，实现打字机效果
-- **每个 Task 独立对话上下文**：每个 task 维护独立的 message history，workspace 的 shared context 作为 system prompt 注入
-- **System Prompt 按任务类型定制**：periodic / one_time / long_term 三种类型各有专门的 system prompt 策略
+- **每个 Task 独立工作目录**：每个 task 在 `workspaces/{projectId}/tasks/{taskId}/` 下有独立的工作目录和 CLAUDE.md，避免并发任务之间的 system prompt 互相覆盖
+- **CLAUDE.md 分层设计**：项目级 CLAUDE.md（项目指令 + 共享上下文）放在 workspace 根目录，任务级 CLAUDE.md（agent prompt + 输出约定 + ASK_USER 格式）放在 task 子目录。Claude CLI 通过 `--add-dir` 标志同时读取两层指令
+- **System Prompt 按任务类型定制**：periodic / one_time / proactive 三种类型各有专门的 system prompt 策略
 - **自定义 Resizable 面板**：纯 CSS flex + JS mouseEvent 实现，替代第三方库以确保兼容性
+- **Draft 双源合并**：Agent Drafts 面板同时展示数据库 OutputArtifact 和 `draft/` 文件系统中的文件，按名称去重，确保 agent 直接写入磁盘的文件也能被用户看到
 
 ### 2.3 数据模型
 
@@ -71,7 +73,31 @@ OutputArtifact (产出)
 ├── content, summary
 ```
 
-### 2.4 目录结构
+### 2.4 Workspace 目录结构
+
+每个项目在 `workspaces/` 下有独立的工作区，每个任务在 `tasks/` 下有独立的子目录：
+
+```
+workspaces/{projectId}/
+├── CLAUDE.md              # 项目级指令（项目 instruction + 共享上下文）
+├── context/               # 用户上传的参考资料
+│   └── .gitkeep
+├── draft/                 # Agent 产出文件（所有任务共享）
+│   └── .gitkeep
+└── tasks/
+    ├── {taskId-1}/
+    │   └── CLAUDE.md      # 任务级指令（agent prompt + 输出约定 + ASK_USER 格式）
+    └── {taskId-2}/
+        └── CLAUDE.md
+```
+
+**设计要点：**
+- Claude CLI 以 `tasks/{taskId}/` 为 `cwd` 运行，自动读取该目录下的 CLAUDE.md
+- 通过 `--add-dir context/` 和 `--add-dir draft/` 让 CLI 同时访问共享目录
+- 项目根目录的 CLAUDE.md 作为上层指令被 CLI 自动继承
+- 并发任务各自有独立的 CLAUDE.md 和 session，互不干扰
+
+### 2.5 代码目录结构
 
 ```
 src/
@@ -88,10 +114,13 @@ src/
 │       ├── messages/        (route.ts — SSE streaming)
 │       ├── context/         (route.ts + [contextId]/route.ts)
 │       ├── outputs/         (route.ts + [outputId]/route.ts)
+│       ├── drafts/          (route.ts — 文件系统 draft 列表)
 │       └── scheduler/       (route.ts)
 ├── lib/
 │   ├── db.ts                # Prisma 单例
-│   ├── agent.ts             # Claude SDK agent 服务 (chat / chatStream / periodic / progress)
+│   ├── agent.ts             # Claude CLI agent 服务 (ensureClaudeMd / chat / chatStream / periodic / progress)
+│   ├── claude-code.ts       # Claude Code CLI 封装 (claudeStream / claudeOneShot / parseAskUser / parseArtifacts)
+│   ├── workspace.ts         # 工作区管理 (createWorkspace / createTaskDir / listDraftFilesDetailed / git 操作)
 │   ├── scheduler.ts         # 定时任务调度器
 │   ├── constants.ts         # 标签映射、轮询间隔
 │   └── utils.ts             # shadcn cn() 工具
@@ -171,9 +200,9 @@ src/
 
 | 类型 | 创建后行为 | 特点 |
 |------|-----------|------|
-| `one_time` | 立即运行，agent 发送初始执行消息 | 完成后自动标记 completed |
-| `periodic` | 计算 nextRunAt，等待调度器触发 | 按设定间隔自动执行 |
-| `long_term` | 立即运行，agent 发送初始分析消息 | 持续跟踪，阶段性汇报 |
+| `one_time` | 立即运行，agent 发送初始执行消息 | 完成后自动标记 completed（无 ASK_USER 时） |
+| `periodic` | 计算 nextRunAt，等待调度器触发 | 按设定间隔自动执行，每次执行在独立 task 子目录 |
+| `proactive` | 立即运行，agent 发送初始分析消息 | 持续跟踪，阶段性汇报 |
 
 ### 3.4 聊天对话
 
@@ -196,14 +225,16 @@ src/
 | 删除上下文 | hover 显示删除按钮 |
 | Agent 引用 | 所有上下文自动作为 system prompt 的一部分提供给 agent |
 
-### 3.6 产出管理（右面板 - 产出 Tab）
+### 3.6 产出管理（右面板 - Agent Drafts）
 
 | 功能 | 说明 |
 |------|------|
-| 产出列表 | 展示名称、类型徽章、关联任务、摘要 |
-| 折叠预览 | 点击展开/折叠内容预览（前 300 字符） |
-| 完整查看 | 弹窗展示产出完整内容 |
-| 自动生成 | agent 回复中包含 artifacts 标记时自动创建 |
+| 双源合并展示 | 同时展示数据库 OutputArtifact 和 `draft/` 目录下的文件系统文件 |
+| 去重逻辑 | DB 产出优先，文件系统中同名文件不重复展示 |
+| 类型标识 | DB 产出显示类型标签（report/document/code 等），文件系统产出显示 "file" |
+| 点击预览 | 点击展开文件内容预览 |
+| 删除 | 仅 DB 产出可删除，文件系统产出不可删除 |
+| 自动刷新 | 切换项目时自动拉取最新 draft 文件列表 |
 
 ### 3.7 定时调度
 
@@ -251,6 +282,7 @@ src/
 | GET | `/api/outputs?projectId=` | 产出列表 |
 | POST | `/api/outputs` | 创建产出 |
 | DELETE | `/api/outputs/[id]` | 删除产出 |
+| GET | `/api/drafts?projectId=` | 文件系统 draft 文件列表（名称、路径、大小、内容、修改时间） |
 | POST | `/api/scheduler` | 触发定时任务检查 |
 
 ---
@@ -279,3 +311,26 @@ npm run dev
 ```
 
 访问 `http://localhost:3000` 进入系统。
+
+## 7. 测试
+
+```bash
+# 单元测试（74 项，无需启动服务器）
+npx tsx tests/test-task-dirs.ts
+
+# API 集成测试（需要先启动 dev server）
+npm run dev
+bash tests/test-api-integration.sh
+```
+
+### 测试覆盖
+
+| 测试范围 | 覆盖内容 |
+|---------|---------|
+| 目录结构 | `getTaskDir`/`createTaskDir` 路径正确性、目录创建、幂等性、多任务隔离 |
+| CLAUDE.md 拆分 | 项目级只含项目指令、任务级只含 agent prompt、无交叉污染 |
+| `--add-dir` 参数 | `claudeStream`/`claudeOneShot` 接受 addDirs、标志插入位置正确 |
+| API 路由集成 | 4 个路由均调用 `createTaskDir`、计算 `addDirs`、传递参数 |
+| Draft 文件列表 | 递归扫描、嵌套路径、排除 `.gitkeep`、空目录处理 |
+| 任务状态 | ASK_USER 触发 `awaiting_input`、one_time 自动完成、periodic/proactive 不自动完成 |
+| UI 合并显示 | `draftFiles` 状态、`fetchDraftFiles` action、DB+FS 去重合并 |
