@@ -4,13 +4,13 @@ import type { FilePreviewTarget } from "@/types";
 interface WorkspaceState {
   selectedProjectId: string | null;
   selectedTaskId: string | null;
-  contributionsTab: "contributions" | "graph";
+  contributionsTab: "contributions" | "graph" | "agent";
   filePreviewOpen: boolean;
   filePreviewTarget: FilePreviewTarget | null;
 
   setSelectedProjectId: (id: string | null) => void;
   setSelectedTaskId: (id: string | null) => void;
-  setContributionsTab: (tab: "contributions" | "graph") => void;
+  setContributionsTab: (tab: "contributions" | "graph" | "agent") => void;
   openFilePreview: (target: FilePreviewTarget) => void;
   closeFilePreview: () => void;
 }

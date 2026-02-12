@@ -58,6 +58,7 @@ async function runInitialTaskAgent(
       workspacePath,
       addDirs,
       taskDir,
+      projectMeta: { name: project.name, description: project.description },
     });
 
     // Save agent response
@@ -142,6 +143,15 @@ export async function POST(request: Request) {
     return NextResponse.json(
       { error: "projectId, name, and type are required" },
       { status: 400 }
+    );
+  }
+
+  // Validate that the project exists
+  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  if (!project) {
+    return NextResponse.json(
+      { error: `Project not found: ${projectId}` },
+      { status: 404 }
     );
   }
 

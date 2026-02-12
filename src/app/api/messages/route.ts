@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { chatStream, parseClaudeResult, ensureClaudeMd } from "@/lib/agent";
+import { chatStream, parseClaudeResult, ensureClaudeMd, type ProjectMeta } from "@/lib/agent";
 import { commitChange, getWorkspacePath, getContextDir, getDraftDir, createTaskDir } from "@/lib/workspace";
 
 export async function GET(request: NextRequest) {
@@ -57,6 +57,10 @@ export async function POST(request: Request) {
   }
 
   const workspacePath = getWorkspacePath(task.projectId);
+  const projectMeta: ProjectMeta = {
+    name: task.project.name,
+    description: task.project.description,
+  };
 
   // Create task subdirectory
   const taskDir = await createTaskDir(task.projectId, taskId);
@@ -69,7 +73,8 @@ export async function POST(request: Request) {
     task.project.context,
     workspacePath,
     task.projectId,
-    taskDir
+    taskDir,
+    projectMeta
   );
 
   // Check if agent has previously replied in this task (determines -c flag)
@@ -97,6 +102,8 @@ export async function POST(request: Request) {
       };
 
       try {
+        const toolCalls: Array<{ tool: string; input: unknown; timestamp: number }> = [];
+
         const { done } = chatStream({
           task,
           userMessage: content,
@@ -106,6 +113,7 @@ export async function POST(request: Request) {
           hasAgentReplied,
           addDirs,
           taskDir,
+          projectMeta,
           callbacks: {
             onToken: (text) => {
               safeEnqueue(
@@ -114,17 +122,36 @@ export async function POST(request: Request) {
                 )
               );
             },
+            onToolUse: (tool, input) => {
+              const entry = { tool, input, timestamp: Date.now() };
+              toolCalls.push(entry);
+              safeEnqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ type: "tool_use", tool, input })}\n\n`
+                )
+              );
+            },
             onResult: async (result) => {
               try {
                 const agentResponse = parseClaudeResult(result);
 
                 // Build agent content, appending askUser question if present
+                const askTag = agentResponse.askUserType || "ASK_USER";
                 const agentContent = agentResponse.askUser
                   ? (agentResponse.content ? agentResponse.content + "\n\n" : "") +
-                    `[ASK_USER: ${agentResponse.askUser}]`
+                    `[${askTag}: ${agentResponse.askUser}]`
                   : agentResponse.content;
 
-                // Save agent message with metadata for askUser
+                // Save agent message with metadata for askUser and toolCalls
+                const metadata: Record<string, unknown> = {};
+                if (agentResponse.askUser) {
+                  metadata.askUser = agentResponse.askUser;
+                  metadata.askUserType = agentResponse.askUserType || "ASK_USER_CONTEXT";
+                }
+                if (toolCalls.length > 0) {
+                  metadata.toolCalls = toolCalls;
+                }
+
                 const messageData: {
                   taskId: string;
                   role: string;
@@ -136,10 +163,8 @@ export async function POST(request: Request) {
                   content: agentContent,
                 };
 
-                if (agentResponse.askUser) {
-                  messageData.metadata = JSON.stringify({
-                    askUser: agentResponse.askUser,
-                  });
+                if (Object.keys(metadata).length > 0) {
+                  messageData.metadata = JSON.stringify(metadata);
                 }
 
                 const agentMessage = await prisma.message.create({
@@ -196,6 +221,8 @@ export async function POST(request: Request) {
                       taskStatusChange: effectiveStatus || agentResponse.taskStatusChange,
                       artifacts: agentResponse.artifacts,
                       askUser: agentResponse.askUser,
+                      askUserType: agentResponse.askUserType,
+                      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
                     })}\n\n`
                   )
                 );

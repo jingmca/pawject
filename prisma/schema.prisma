@@ -91,3 +91,35 @@ model OutputArtifact {
   @@index([projectId])
   @@index([taskId])
 }
+
+model UserTodo {
+  id          String   @id @default(cuid())
+  projectId   String
+  taskId      String
+  type        String   // ASK_USER_CONTEXT | ASK_USER_CONFIRM
+  query       String
+  suggestion  String?  // Project Agent's suggestion (e.g. where to add context)
+  priority    String   @default("medium") // high | medium | low
+  resolved    Boolean  @default(false)
+  response    String?  // User's reply
+  createdAt   DateTime @default(now())
+  resolvedAt  DateTime?
+
+  @@index([projectId])
+  @@index([taskId])
+  @@index([resolved])
+}
+
+model ProjectAgent {
+  id          String   @id @default(cuid())
+  projectId   String   @unique
+  pid         Int?     // OS process ID
+  status      String   @default("stopped") // running | stopped | crashed
+  lastHeartbeat DateTime?
+  sessionId   String?  // Claude Code session ID
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([projectId])
+  @@index([status])
+}

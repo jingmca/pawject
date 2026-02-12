@@ -1,14 +1,27 @@
 import { prisma } from "@/lib/db";
 import { executePeriodicRun, generateProgressUpdate } from "@/lib/agent";
 import { getWorkspacePath, getContextDir, getDraftDir, createTaskDir, commitChange } from "@/lib/workspace";
+import { checkAndRestartCrashedAgents } from "@/lib/project-agent";
 import type { ScheduleConfig } from "@/types";
 
 export async function checkAndRunScheduledTasks(): Promise<{
   periodicRan: number;
   progressUpdates: number;
+  agentsRestarted: number;
 }> {
   let periodicRan = 0;
   let progressUpdates = 0;
+  let agentsRestarted = 0;
+
+  // 0. Check and restart any crashed project agents
+  try {
+    agentsRestarted = await checkAndRestartCrashedAgents();
+    if (agentsRestarted > 0) {
+      console.log(`[scheduler] Restarted ${agentsRestarted} crashed project agents`);
+    }
+  } catch (err) {
+    console.error("[scheduler] Error checking crashed agents:", err);
+  }
 
   const now = new Date();
 
@@ -47,7 +60,8 @@ export async function checkAndRunScheduledTasks(): Promise<{
         task.project.instruction,
         workspacePath,
         addDirs,
-        taskDir
+        taskDir,
+        { name: task.project.name, description: task.project.description }
       );
 
       await prisma.message.create({
@@ -153,7 +167,8 @@ export async function checkAndRunScheduledTasks(): Promise<{
         task.project.instruction,
         workspacePath,
         addDirs,
-        taskDir
+        taskDir,
+        { name: task.project.name, description: task.project.description }
       );
 
       await prisma.message.create({
@@ -203,5 +218,5 @@ export async function checkAndRunScheduledTasks(): Promise<{
     }
   }
 
-  return { periodicRan, progressUpdates };
+  return { periodicRan, progressUpdates, agentsRestarted };
 }

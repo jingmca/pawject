@@ -69,10 +69,17 @@ export interface FilePreviewTarget {
   language?: string;
 }
 
+export const AskUserType = {
+  CONTEXT: "ASK_USER_CONTEXT",
+  CONFIRM: "ASK_USER_CONFIRM",
+} as const;
+export type AskUserType = (typeof AskUserType)[keyof typeof AskUserType];
+
 export interface AskUserQuery {
   taskId: string;
   taskName: string;
   question: string;
+  askUserType?: AskUserType;
   messageId: string;
   createdAt: Date;
 }

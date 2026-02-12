@@ -20,6 +20,7 @@ export interface AgentResponse {
   content: string;
   taskStatusChange?: string;
   askUser?: string;
+  askUserType?: "ASK_USER_CONTEXT" | "ASK_USER_CONFIRM";
   artifacts?: Array<{
     name: string;
     type: string;
@@ -30,9 +31,14 @@ export interface AgentResponse {
   costUsd?: number;
 }
 
+export interface ProjectMeta {
+  name: string;
+  description: string;
+}
+
 /**
  * Build system prompt and write CLAUDE.md files.
- * - Project CLAUDE.md (at project workspace root): project instruction + shared context
+ * - Project CLAUDE.md (at project workspace root): project info + instruction + shared context + tool docs
  * - Task CLAUDE.md (at taskDir): task-type-specific agent prompt + output conventions + ASK_USER format
  * If taskDir is not provided, falls back to writing a single combined CLAUDE.md at workspace root.
  */
@@ -42,11 +48,12 @@ async function ensureClaudeMd(
   context: ContextItem[],
   workspacePath: string,
   projectId: string,
-  taskDir?: string
+  taskDir?: string,
+  projectMeta?: ProjectMeta
 ): Promise<void> {
   const contextBlock =
     context.length > 0
-      ? `\n\n## 共享上下文信息\n${context.map((c) => `### ${c.name} (${c.type})\n${c.content}`).join("\n\n")}`
+      ? `\n\n## 共享上下文\n${context.map((c) => `### ${c.name} (${c.type})\n${c.content}`).join("\n\n")}`
       : "";
 
   const typePrompts: Record<string, string> = {
@@ -72,13 +79,64 @@ async function ensureClaudeMd(
 如果你需要生成产物（报告、文档、代码等），请直接写入 draft/ 目录下的文件。
 
 ## 与用户交互
-如果你需要用户补充信息或做决策，请在回复中使用以下格式标记：
-[ASK_USER: 你的问题内容]
-使用此标记后，任务将暂停等待用户回复。不要在文本中直接提问，而是使用此标记。`;
+当你需要与用户交互时，使用以下两种标记之一：
+
+### 请求补充信息（缺信息，无法继续）
+[ASK_USER_CONTEXT: 你的问题内容]
+使用场景：你需要用户提供额外信息才能继续执行任务。
+
+### 请求确认决策（有方案，待确认）
+[ASK_USER_CONFIRM: 你的问题内容]
+使用场景：你已有方案但需要用户确认后才能继续。
+
+使用任一标记后，任务将暂停等待用户回复。不要在文本中直接提问，而是使用上述标记。
+
+## 任务进度管理
+在执行过程中，请维护 todo.md 文件记录你的执行计划和进度：
+- 使用 checkbox 格式：\`- [ ] 待完成\` / \`- [x] 已完成\`
+- 包含 ASK_USER 条目的状态
+- 每完成一步更新 todo.md`;
+
+  // Build the enhanced project-level CLAUDE.md
+  const projectName = projectMeta?.name || "项目工作区";
+  const projectDesc = projectMeta?.description ? `> ${projectMeta.description}` : "";
+
+  const projectClaudeMd = `# ${projectName}
+${projectDesc}
+
+## 项目信息
+- Project ID: \`${projectId}\`
+- API Base: \`${process.env.PAWJECT_API_URL || "http://localhost:3000"}\`
+
+${projectInstruction ? `## 项目指令\n${projectInstruction}` : ""}
+
+## 工作区目录结构
+\`\`\`
+workspaces/${projectId}/
+├── CLAUDE.md        ← 本文件（项目级指令）
+├── TODO.md          ← 项目待办
+├── context/         ← 参考资料（只读）
+├── draft/           ← 产出文件
+└── tasks/{taskId}/  ← 任务独立工作空间
+    └── CLAUDE.md    ← 任务级指令
+\`\`\`
+
+## 任务管理工具
+以下 CLI 命令可在工作区目录下使用：
+| 命令 | 功能 |
+|------|------|
+| \`pawject tasks\` | 列出项目所有任务 |
+| \`pawject task <id>\` | 任务详情 + 最近消息 |
+| \`pawject task-create --name "x" --type one_time --desc "y"\` | 创建新任务 |
+| \`pawject task-stop <id>\` | 停止任务 |
+| \`pawject drafts\` | 列出 draft 文件 |
+| \`pawject context\` | 列出上下文项 |
+| \`pawject todo\` | 读取 TODO.md |
+| \`pawject todo-add "内容"\` | 追加条目到 TODO.md |
+${contextBlock}`;
 
   if (taskDir) {
-    // Write project CLAUDE.md at project root (project instruction + shared context only)
-    const projectClaudeMd = `${projectInstruction ? `## 项目指令\n${projectInstruction}` : "# 项目工作区"}${contextBlock}`;
+    // Write project CLAUDE.md at project root
     await writeWorkspaceFile(projectId, "CLAUDE.md", projectClaudeMd);
 
     // Write task CLAUDE.md at task dir (task-specific prompt + conventions)
@@ -87,15 +145,11 @@ async function ensureClaudeMd(
     await fs.writeFile(taskClaudeMdPath, taskSpecificContent, "utf-8");
   } else {
     // Fallback: write combined CLAUDE.md at workspace root
-    const claudeMd = `${basePrompt}${projectInstruction ? `\n\n## 项目指令\n${projectInstruction}` : ""}${contextBlock}
+    const claudeMd = `${projectClaudeMd}
 
-## 输出格式约定
-如果你需要生成产物（报告、文档、代码等），请直接写入 draft/ 目录下的文件。
+---
 
-## 与用户交互
-如果你需要用户补充信息或做决策，请在回复中使用以下格式标记：
-[ASK_USER: 你的问题内容]
-使用此标记后，任务将暂停等待用户回复。不要在文本中直接提问，而是使用此标记。`;
+${taskSpecificContent}`;
     await writeWorkspaceFile(projectId, "CLAUDE.md", claudeMd);
   }
 }
@@ -113,6 +167,7 @@ export function chatStream(params: {
   callbacks: ClaudeStreamCallbacks;
   addDirs?: string[];
   taskDir?: string;
+  projectMeta?: ProjectMeta;
 }): { process: ChildProcess; done: Promise<ClaudeResult> } {
   const { task, userMessage, hasAgentReplied, callbacks, addDirs, taskDir } = params;
   const cwd = taskDir || params.workspacePath;
@@ -130,7 +185,7 @@ export function chatStream(params: {
  * Parse a completed Claude result into our AgentResponse format.
  */
 export function parseClaudeResult(result: ClaudeResult): AgentResponse {
-  const { cleanContent: afterAskUser, askUser } = parseAskUser(result.result);
+  const { cleanContent: afterAskUser, askUser, askUserType } = parseAskUser(result.result);
   const { cleanContent, artifacts } = parseArtifacts(afterAskUser);
 
   const response: AgentResponse = {
@@ -141,6 +196,7 @@ export function parseClaudeResult(result: ClaudeResult): AgentResponse {
 
   if (askUser) {
     response.askUser = askUser;
+    response.askUserType = askUserType;
     response.taskStatusChange = "awaiting_input";
   }
 
@@ -163,12 +219,13 @@ export async function chat(params: {
   hasAgentReplied?: boolean;
   addDirs?: string[];
   taskDir?: string;
+  projectMeta?: ProjectMeta;
 }): Promise<AgentResponse> {
-  const { task, userMessage, sharedContext, projectInstruction, workspacePath, hasAgentReplied, addDirs, taskDir } =
+  const { task, userMessage, sharedContext, projectInstruction, workspacePath, hasAgentReplied, addDirs, taskDir, projectMeta } =
     params;
 
   // Write CLAUDE.md before calling CLI
-  await ensureClaudeMd(task, projectInstruction, sharedContext, workspacePath, task.projectId, taskDir);
+  await ensureClaudeMd(task, projectInstruction, sharedContext, workspacePath, task.projectId, taskDir, projectMeta);
 
   const cwd = taskDir || workspacePath;
 
@@ -191,7 +248,8 @@ export async function executePeriodicRun(
   projectInstruction: string,
   workspacePath: string,
   addDirs?: string[],
-  taskDir?: string
+  taskDir?: string,
+  projectMeta?: ProjectMeta
 ): Promise<AgentResponse> {
   return chat({
     task,
@@ -201,6 +259,7 @@ export async function executePeriodicRun(
     workspacePath,
     addDirs,
     taskDir,
+    projectMeta,
   });
 }
 
@@ -213,7 +272,8 @@ export async function generateProgressUpdate(
   projectInstruction: string,
   workspacePath: string,
   addDirs?: string[],
-  taskDir?: string
+  taskDir?: string,
+  projectMeta?: ProjectMeta
 ): Promise<AgentResponse> {
   return chat({
     task,
@@ -223,6 +283,7 @@ export async function generateProgressUpdate(
     workspacePath,
     addDirs,
     taskDir,
+    projectMeta,
   });
 }
 

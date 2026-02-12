@@ -5,6 +5,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useMessagesStore } from "@/stores/messages-store";
 import { ChatMessage } from "./chat-message";
 import { ChatInput } from "./chat-input";
+import { ToolCallsList } from "./tool-call-card";
 import type { Task } from "@/generated/prisma/client";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -13,7 +14,7 @@ interface ChatSessionProps {
 }
 
 export function ChatSession({ task }: ChatSessionProps) {
-  const { messagesByTask, fetchMessages, isStreaming, streamingTaskId, streamingContent } =
+  const { messagesByTask, fetchMessages, isStreaming, streamingTaskId, streamingContent, streamingToolCalls } =
     useMessagesStore();
   const messages = messagesByTask[task.id] || [];
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -45,7 +46,7 @@ export function ChatSession({ task }: ChatSessionProps) {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages.length, streamingContent]);
+  }, [messages.length, streamingContent, streamingToolCalls.length]);
 
   const isTaskActive = ["running", "awaiting_input"].includes(task.status);
 
@@ -61,6 +62,14 @@ export function ChatSession({ task }: ChatSessionProps) {
           {messages.map((msg) => (
             <ChatMessage key={msg.id} message={msg} />
           ))}
+          {isThisTaskStreaming && streamingToolCalls.length > 0 && (
+            <div className="flex gap-3 justify-start">
+              <div className="w-7 shrink-0" />
+              <div className="max-w-[75%] w-full">
+                <ToolCallsList toolCalls={streamingToolCalls} streaming />
+              </div>
+            </div>
+          )}
           {isThisTaskStreaming && streamingContent && (
             <ChatMessage
               message={{

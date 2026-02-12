@@ -4,7 +4,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { ContributionsTab } from "./contributions-tab";
 import { GraphTab } from "./graph-tab";
-import { Layers, GitBranch } from "lucide-react";
+import { AgentTab } from "./agent-tab";
+import { Layers, GitBranch, Bot } from "lucide-react";
 
 interface ContributionsPanelProps {
   projectId: string;
@@ -18,7 +19,7 @@ export function ContributionsPanel({ projectId }: ContributionsPanelProps) {
       <Tabs
         value={contributionsTab}
         onValueChange={(v) =>
-          setContributionsTab(v as "contributions" | "graph")
+          setContributionsTab(v as "contributions" | "graph" | "agent")
         }
         className="flex flex-col h-full"
       >
@@ -32,6 +33,10 @@ export function ContributionsPanel({ projectId }: ContributionsPanelProps) {
               <GitBranch className="h-3.5 w-3.5 mr-1.5" />
               Graph
             </TabsTrigger>
+            <TabsTrigger value="agent" className="flex-1 text-xs">
+              <Bot className="h-3.5 w-3.5 mr-1.5" />
+              Agent
+            </TabsTrigger>
           </TabsList>
         </div>
 
@@ -40,6 +45,9 @@ export function ContributionsPanel({ projectId }: ContributionsPanelProps) {
         </TabsContent>
         <TabsContent value="graph" className="flex-1 m-0 min-h-0">
           <GraphTab />
+        </TabsContent>
+        <TabsContent value="agent" className="flex-1 m-0 min-h-0">
+          <AgentTab projectId={projectId} />
         </TabsContent>
       </Tabs>
     </div>

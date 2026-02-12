@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
+import path from "node:path";
 
 const CLAUDE_CLI = process.env.CLAUDE_CLI_PATH || "claude";
 
@@ -25,15 +26,20 @@ export interface ClaudeStreamCallbacks {
 function buildEnv(): NodeJS.ProcessEnv {
   const currentPath = process.env.PATH || "";
   const extraPaths = "/opt/homebrew/bin:/usr/local/bin";
+  const scriptsDir = path.join(process.cwd(), "scripts");
   return {
     ...process.env,
-    PATH: currentPath.includes("/opt/homebrew/bin")
-      ? currentPath
-      : `${extraPaths}:${currentPath}`,
+    PATH: [
+      scriptsDir,
+      ...(currentPath.includes("/opt/homebrew/bin")
+        ? [currentPath]
+        : [extraPaths, currentPath]),
+    ].join(":"),
     ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_API_KEY,
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
     ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
     ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL,
+    PAWJECT_API_URL: process.env.PAWJECT_API_URL || `http://localhost:${process.env.PORT || "3000"}`,
   };
 }
 
@@ -253,16 +259,40 @@ export async function claudeOneShot(params: {
 
 /**
  * Parse askUser markers from Claude's response.
+ * Supports both types: [ASK_USER_CONTEXT: ...] and [ASK_USER_CONFIRM: ...]
+ * Falls back to legacy [ASK_USER: ...] marker.
  */
 export function parseAskUser(content: string): {
   cleanContent: string;
   askUser?: string;
+  askUserType?: "ASK_USER_CONTEXT" | "ASK_USER_CONFIRM";
 } {
+  // Try new typed markers first
+  const contextMatch = content.match(/\[ASK_USER_CONTEXT:\s*([\s\S]*?)\]/);
+  if (contextMatch) {
+    return {
+      cleanContent: content.replace(contextMatch[0], "").trim(),
+      askUser: contextMatch[1].trim(),
+      askUserType: "ASK_USER_CONTEXT",
+    };
+  }
+
+  const confirmMatch = content.match(/\[ASK_USER_CONFIRM:\s*([\s\S]*?)\]/);
+  if (confirmMatch) {
+    return {
+      cleanContent: content.replace(confirmMatch[0], "").trim(),
+      askUser: confirmMatch[1].trim(),
+      askUserType: "ASK_USER_CONFIRM",
+    };
+  }
+
+  // Fallback: legacy [ASK_USER: ...] marker (treated as CONTEXT by default)
   const match = content.match(/\[ASK_USER:\s*([\s\S]*?)\]/);
   if (match) {
     return {
       cleanContent: content.replace(match[0], "").trim(),
       askUser: match[1].trim(),
+      askUserType: "ASK_USER_CONTEXT",
     };
   }
   return { cleanContent: content };

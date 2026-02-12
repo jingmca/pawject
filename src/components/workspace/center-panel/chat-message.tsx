@@ -2,9 +2,11 @@
 
 import { cn } from "@/lib/utils";
 import type { Message } from "@/generated/prisma/client";
-import { Bot, User, Info, FileText, MessageCircleQuestion } from "lucide-react";
+import { Bot, User, Info, FileText, MessageCircleQuestion, HelpCircle } from "lucide-react";
 import { useWorkspaceStore } from "@/stores/workspace-store";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
+import { ToolCallsList } from "./tool-call-card";
+import type { ToolCallEntry } from "@/stores/messages-store";
 
 interface ChatMessageProps {
   message: Message;
@@ -14,14 +16,14 @@ interface ChatMessageProps {
 // Detect file references like [FILE: filename.ext] or [file:path/to/file]
 const FILE_REF_REGEX = /\[(?:FILE|file):\s*([^\]]+)\]/g;
 
-// Detect ASK_USER markers like [ASK_USER: question here]
-const ASK_USER_REGEX = /\[ASK_USER:\s*([^\]]+)\]/g;
+// Detect ASK_USER markers: [ASK_USER_CONTEXT: ...], [ASK_USER_CONFIRM: ...], [ASK_USER: ...]
+const ASK_USER_REGEX = /\[ASK_USER(?:_(CONTEXT|CONFIRM))?:\s*([^\]]+)\]/g;
 
 function parseMessageContent(content: string) {
   const parts: Array<
     | { type: "text"; content: string }
     | { type: "file_ref"; fileName: string }
-    | { type: "ask_user"; question: string }
+    | { type: "ask_user"; question: string; askType: "CONTEXT" | "CONFIRM" }
   > = [];
 
   let lastIndex = 0;
@@ -32,6 +34,7 @@ function parseMessageContent(content: string) {
     fullMatch: string;
     type: "file_ref" | "ask_user";
     value: string;
+    askType?: "CONTEXT" | "CONFIRM";
   }> = [];
 
   // Reset regex state
@@ -52,7 +55,8 @@ function parseMessageContent(content: string) {
       index: match.index,
       fullMatch: match[0],
       type: "ask_user",
-      value: match[1].trim(),
+      value: match[2].trim(),
+      askType: (match[1] as "CONTEXT" | "CONFIRM") || "CONTEXT",
     });
   }
 
@@ -66,7 +70,7 @@ function parseMessageContent(content: string) {
     if (m.type === "file_ref") {
       parts.push({ type: "file_ref", fileName: m.value });
     } else {
-      parts.push({ type: "ask_user", question: m.value });
+      parts.push({ type: "ask_user", question: m.value, askType: m.askType || "CONTEXT" });
     }
 
     lastIndex = m.index + m.fullMatch.length;
@@ -103,14 +107,27 @@ function FileChip({ fileName }: { fileName: string }) {
   );
 }
 
-function AskUserCard({ question }: { question: string }) {
+function AskUserCard({ question, askType }: { question: string; askType: "CONTEXT" | "CONFIRM" }) {
+  const isContext = askType === "CONTEXT";
   return (
-    <div className="my-2 rounded-lg border border-orange-500/30 bg-orange-500/5 p-3">
+    <div className={cn(
+      "my-2 rounded-lg border p-3",
+      isContext
+        ? "border-red-500/30 bg-red-500/5"
+        : "border-orange-500/30 bg-orange-500/5"
+    )}>
       <div className="flex items-start gap-2">
-        <MessageCircleQuestion className="h-4 w-4 text-orange-400 mt-0.5 shrink-0" />
+        {isContext ? (
+          <HelpCircle className="h-4 w-4 text-red-400 mt-0.5 shrink-0" />
+        ) : (
+          <MessageCircleQuestion className="h-4 w-4 text-orange-400 mt-0.5 shrink-0" />
+        )}
         <div>
-          <div className="text-xs font-medium text-orange-400 mb-1">
-            需要你的回复
+          <div className={cn(
+            "text-xs font-medium mb-1",
+            isContext ? "text-red-400" : "text-orange-400"
+          )}>
+            {isContext ? "需要补充信息" : "需要确认决策"}
           </div>
           <div className="text-sm text-foreground">{question}</div>
         </div>
@@ -134,6 +151,16 @@ export function ChatMessage({ message, isStreaming }: ChatMessageProps) {
   const isAgent = message.role === "agent";
   const parts = isAgent ? parseMessageContent(message.content) : null;
 
+  // Parse toolCalls from metadata for completed agent messages
+  const toolCalls = useMemo<ToolCallEntry[]>(() => {
+    if (!isAgent || !message.metadata) return [];
+    try {
+      const meta = JSON.parse(message.metadata);
+      if (Array.isArray(meta.toolCalls)) return meta.toolCalls;
+    } catch { /* ignore */ }
+    return [];
+  }, [isAgent, message.metadata]);
+
   return (
     <div
       className={cn("flex gap-3", isAgent ? "justify-start" : "justify-end")}
@@ -151,6 +178,9 @@ export function ChatMessage({ message, isStreaming }: ChatMessageProps) {
             : "bg-primary text-primary-foreground"
         )}
       >
+        {isAgent && toolCalls.length > 0 && (
+          <ToolCallsList toolCalls={toolCalls} />
+        )}
         <div className="whitespace-pre-wrap break-words">
           {isAgent && parts
             ? parts.map((part, i) => {
@@ -158,7 +188,7 @@ export function ChatMessage({ message, isStreaming }: ChatMessageProps) {
                   return <FileChip key={i} fileName={part.fileName} />;
                 }
                 if (part.type === "ask_user") {
-                  return <AskUserCard key={i} question={part.question} />;
+                  return <AskUserCard key={i} question={part.question} askType={part.askType} />;
                 }
                 return <span key={i}>{part.content}</span>;
               })

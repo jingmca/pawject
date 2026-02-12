@@ -34,6 +34,15 @@ export async function createTaskDir(
 ): Promise<string> {
   const taskDir = getTaskDir(projectId, taskId);
   await fs.mkdir(taskDir, { recursive: true });
+
+  // Create initial todo.md if it doesn't exist
+  const todoPath = path.join(taskDir, "todo.md");
+  try {
+    await fs.access(todoPath);
+  } catch {
+    await fs.writeFile(todoPath, `# Task Todo\n\n<!-- Agent maintains this file to track execution progress -->\n\n## Plan\n- [ ] Analyze task requirements\n- [ ] Execute task\n- [ ] Generate output\n\n## ASK_USER Items\n<!-- Items pending user response -->\n`, "utf-8");
+  }
+
   return taskDir;
 }
 
@@ -196,6 +205,18 @@ export async function getGitLog(
     return entries;
   } catch {
     return [];
+  }
+}
+
+export async function readTaskTodo(
+  projectId: string,
+  taskId: string
+): Promise<string | null> {
+  const todoPath = path.join(getTaskDir(projectId, taskId), "todo.md");
+  try {
+    return await fs.readFile(todoPath, "utf-8");
+  } catch {
+    return null;
   }
 }
 

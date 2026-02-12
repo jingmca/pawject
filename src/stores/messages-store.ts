@@ -3,11 +3,18 @@ import type { Message } from "@/generated/prisma/client";
 import { useTasksStore } from "@/stores/tasks-store";
 import { useAskUserStore } from "@/stores/ask-user-store";
 
+export interface ToolCallEntry {
+  tool: string;
+  input: unknown;
+  timestamp: number;
+}
+
 interface MessagesState {
   messagesByTask: Record<string, Message[]>;
   streamingContent: string;
   isStreaming: boolean;
   streamingTaskId: string | null;
+  streamingToolCalls: ToolCallEntry[];
 
   fetchMessages: (taskId: string) => Promise<void>;
   sendMessage: (taskId: string, content: string) => Promise<void>;
@@ -19,6 +26,7 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
   streamingContent: "",
   isStreaming: false,
   streamingTaskId: null,
+  streamingToolCalls: [],
 
   fetchMessages: async (taskId) => {
     const res = await fetch(`/api/messages?taskId=${taskId}`);
@@ -56,12 +64,13 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
       isStreaming: true,
       streamingContent: "",
       streamingTaskId: taskId,
+      streamingToolCalls: [],
     });
 
     const safetyTimer = setTimeout(() => {
       if (get().isStreaming) {
         console.warn("[messages-store] Safety timeout: forcing streaming cleanup");
-        set({ isStreaming: false, streamingContent: "", streamingTaskId: null });
+        set({ isStreaming: false, streamingContent: "", streamingTaskId: null, streamingToolCalls: [] });
         get().fetchMessages(taskId);
       }
     }, 120_000);
@@ -103,15 +112,29 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
             if (data.type === "delta") {
               accumulated += data.content;
               set({ streamingContent: accumulated });
+            } else if (data.type === "tool_use") {
+              const toolCall: ToolCallEntry = {
+                tool: data.tool,
+                input: data.input,
+                timestamp: Date.now(),
+              };
+              set({ streamingToolCalls: [...get().streamingToolCalls, toolCall] });
             } else if (data.type === "done") {
               streamDone = true;
+              // Build metadata with askUser and toolCalls
+              const metadataObj: Record<string, unknown> = {};
+              if (data.askUser) metadataObj.askUser = data.askUser;
+              if (data.toolCalls && data.toolCalls.length > 0) {
+                metadataObj.toolCalls = data.toolCalls;
+              }
+
               const agentMessage: Message = {
                 id: data.messageId,
                 taskId,
                 role: "agent",
                 content: accumulated,
-                metadata: data.askUser
-                  ? JSON.stringify({ askUser: data.askUser })
+                metadata: Object.keys(metadataObj).length > 0
+                  ? JSON.stringify(metadataObj)
                   : null,
                 createdAt: new Date(),
               };
@@ -125,6 +148,7 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
                 isStreaming: false,
                 streamingContent: "",
                 streamingTaskId: null,
+                streamingToolCalls: [],
               });
 
               // Sync task status change
@@ -159,6 +183,7 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
                 isStreaming: false,
                 streamingContent: "",
                 streamingTaskId: null,
+                streamingToolCalls: [],
               });
               get().fetchMessages(taskId);
             }
@@ -173,11 +198,12 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
           isStreaming: false,
           streamingContent: "",
           streamingTaskId: null,
+          streamingToolCalls: [],
         });
         get().fetchMessages(taskId);
       }
     } catch {
-      set({ isStreaming: false, streamingContent: "", streamingTaskId: null });
+      set({ isStreaming: false, streamingContent: "", streamingTaskId: null, streamingToolCalls: [] });
       get().fetchMessages(taskId);
     } finally {
       clearTimeout(safetyTimer);
@@ -186,6 +212,7 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
           isStreaming: false,
           streamingContent: "",
           streamingTaskId: null,
+          streamingToolCalls: [],
         });
       }
     }
