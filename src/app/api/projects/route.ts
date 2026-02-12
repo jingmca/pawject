@@ -5,6 +5,9 @@ import {
   createWorkspace,
   initGitRepo,
   getWorkspacePath,
+  getContextDir,
+  getDraftDir,
+  createTaskDir,
   commitChange,
   writeWorkspaceFile,
 } from "@/lib/workspace";
@@ -29,6 +32,10 @@ async function runInitialAgent(
 ) {
   try {
     const workspacePath = getWorkspacePath(projectId);
+
+    // Create task subdirectory
+    const taskDir = await createTaskDir(projectId, taskId);
+    const addDirs = [getContextDir(projectId), getDraftDir(projectId)];
 
     // First classify the task type
     const classifyTask = {
@@ -62,6 +69,8 @@ Project instruction: ${instruction}`,
       sharedContext: [],
       projectInstruction: "",
       workspacePath,
+      addDirs,
+      taskDir,
     });
 
     // Parse classification
@@ -115,6 +124,8 @@ Project instruction: ${instruction}`,
       sharedContext: [],
       projectInstruction: instruction,
       workspacePath,
+      addDirs,
+      taskDir,
     });
 
     const messageData: {
@@ -154,6 +165,12 @@ Project instruction: ${instruction}`,
       await prisma.task.update({
         where: { id: taskId },
         data: { status: response.taskStatusChange },
+      });
+    } else if (task.type === "one_time") {
+      // Auto-complete one_time tasks when agent finishes without explicit status change
+      await prisma.task.update({
+        where: { id: taskId },
+        data: { status: "completed" },
       });
     }
 

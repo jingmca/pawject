@@ -1,4 +1,6 @@
 import type { Task, ContextItem } from "@/generated/prisma/client";
+import path from "node:path";
+import fs from "node:fs/promises";
 import {
   claudeStream,
   claudeOneShot,
@@ -29,15 +31,18 @@ export interface AgentResponse {
 }
 
 /**
- * Build system prompt and write it to CLAUDE.md in the workspace.
- * Claude Code CLI automatically reads this file as project-level instructions.
+ * Build system prompt and write CLAUDE.md files.
+ * - Project CLAUDE.md (at project workspace root): project instruction + shared context
+ * - Task CLAUDE.md (at taskDir): task-type-specific agent prompt + output conventions + ASK_USER format
+ * If taskDir is not provided, falls back to writing a single combined CLAUDE.md at workspace root.
  */
 async function ensureClaudeMd(
   task: Task,
   projectInstruction: string,
   context: ContextItem[],
   workspacePath: string,
-  projectId: string
+  projectId: string,
+  taskDir?: string
 ): Promise<void> {
   const contextBlock =
     context.length > 0
@@ -61,7 +66,7 @@ async function ensureClaudeMd(
 
   const basePrompt = typePrompts[task.type] || typePrompts.one_time;
 
-  const claudeMd = `${basePrompt}${projectInstruction ? `\n\n## 项目指令\n${projectInstruction}` : ""}${contextBlock}
+  const taskSpecificContent = `${basePrompt}
 
 ## 输出格式约定
 如果你需要生成产物（报告、文档、代码等），请直接写入 draft/ 目录下的文件。
@@ -71,7 +76,28 @@ async function ensureClaudeMd(
 [ASK_USER: 你的问题内容]
 使用此标记后，任务将暂停等待用户回复。不要在文本中直接提问，而是使用此标记。`;
 
-  await writeWorkspaceFile(projectId, "CLAUDE.md", claudeMd);
+  if (taskDir) {
+    // Write project CLAUDE.md at project root (project instruction + shared context only)
+    const projectClaudeMd = `${projectInstruction ? `## 项目指令\n${projectInstruction}` : "# 项目工作区"}${contextBlock}`;
+    await writeWorkspaceFile(projectId, "CLAUDE.md", projectClaudeMd);
+
+    // Write task CLAUDE.md at task dir (task-specific prompt + conventions)
+    const taskClaudeMdPath = path.join(taskDir, "CLAUDE.md");
+    await fs.mkdir(taskDir, { recursive: true });
+    await fs.writeFile(taskClaudeMdPath, taskSpecificContent, "utf-8");
+  } else {
+    // Fallback: write combined CLAUDE.md at workspace root
+    const claudeMd = `${basePrompt}${projectInstruction ? `\n\n## 项目指令\n${projectInstruction}` : ""}${contextBlock}
+
+## 输出格式约定
+如果你需要生成产物（报告、文档、代码等），请直接写入 draft/ 目录下的文件。
+
+## 与用户交互
+如果你需要用户补充信息或做决策，请在回复中使用以下格式标记：
+[ASK_USER: 你的问题内容]
+使用此标记后，任务将暂停等待用户回复。不要在文本中直接提问，而是使用此标记。`;
+    await writeWorkspaceFile(projectId, "CLAUDE.md", claudeMd);
+  }
 }
 
 /**
@@ -85,13 +111,17 @@ export function chatStream(params: {
   workspacePath: string;
   hasAgentReplied: boolean; // true if agent has responded before in this task
   callbacks: ClaudeStreamCallbacks;
+  addDirs?: string[];
+  taskDir?: string;
 }): { process: ChildProcess; done: Promise<ClaudeResult> } {
-  const { task, userMessage, workspacePath, hasAgentReplied, callbacks } = params;
+  const { task, userMessage, hasAgentReplied, callbacks, addDirs, taskDir } = params;
+  const cwd = taskDir || params.workspacePath;
 
   return claudeStream({
     prompt: userMessage,
-    cwd: workspacePath,
+    cwd,
     continueConversation: hasAgentReplied,
+    addDirs,
     callbacks,
   });
 }
@@ -131,17 +161,22 @@ export async function chat(params: {
   projectInstruction: string;
   workspacePath: string;
   hasAgentReplied?: boolean;
+  addDirs?: string[];
+  taskDir?: string;
 }): Promise<AgentResponse> {
-  const { task, userMessage, sharedContext, projectInstruction, workspacePath, hasAgentReplied } =
+  const { task, userMessage, sharedContext, projectInstruction, workspacePath, hasAgentReplied, addDirs, taskDir } =
     params;
 
   // Write CLAUDE.md before calling CLI
-  await ensureClaudeMd(task, projectInstruction, sharedContext, workspacePath, task.projectId);
+  await ensureClaudeMd(task, projectInstruction, sharedContext, workspacePath, task.projectId, taskDir);
+
+  const cwd = taskDir || workspacePath;
 
   const result = await claudeOneShot({
     prompt: userMessage,
-    cwd: workspacePath,
+    cwd,
     continueConversation: !!hasAgentReplied,
+    addDirs,
   });
 
   return parseClaudeResult(result);
@@ -154,7 +189,9 @@ export async function executePeriodicRun(
   task: Task,
   context: ContextItem[],
   projectInstruction: string,
-  workspacePath: string
+  workspacePath: string,
+  addDirs?: string[],
+  taskDir?: string
 ): Promise<AgentResponse> {
   return chat({
     task,
@@ -162,6 +199,8 @@ export async function executePeriodicRun(
     sharedContext: context,
     projectInstruction,
     workspacePath,
+    addDirs,
+    taskDir,
   });
 }
 
@@ -172,7 +211,9 @@ export async function generateProgressUpdate(
   task: Task,
   context: ContextItem[],
   projectInstruction: string,
-  workspacePath: string
+  workspacePath: string,
+  addDirs?: string[],
+  taskDir?: string
 ): Promise<AgentResponse> {
   return chat({
     task,
@@ -180,6 +221,8 @@ export async function generateProgressUpdate(
     sharedContext: context,
     projectInstruction,
     workspacePath,
+    addDirs,
+    taskDir,
   });
 }
 

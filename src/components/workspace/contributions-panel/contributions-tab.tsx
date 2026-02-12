@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
@@ -28,7 +28,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useContextStore } from "@/stores/context-store";
-import { useOutputsStore } from "@/stores/outputs-store";
+import { useOutputsStore, type DraftFile } from "@/stores/outputs-store";
 import { useWorkspaceStore } from "@/stores/workspace-store";
 import { CONTEXT_TYPE_LABELS, OUTPUT_TYPE_LABELS } from "@/lib/constants";
 import type { ContextItem } from "@/generated/prisma/client";
@@ -53,15 +53,70 @@ const outputTypeIcons: Record<string, React.ElementType> = {
   other: File,
 };
 
+interface MergedDraft {
+  id: string;
+  name: string;
+  type: string;
+  content: string;
+  summary?: string;
+  source: "db" | "fs";
+  artifact?: OutputArtifact;
+  draftFile?: DraftFile;
+}
+
 export function ContributionsTab({ projectId }: ContributionsTabProps) {
   const { items: contextItems, addItem, removeItem } = useContextStore();
-  const { outputs, removeOutput } = useOutputsStore();
+  const { outputs, draftFiles, fetchDraftFiles, removeOutput } = useOutputsStore();
   const openFilePreview = useWorkspaceStore((s) => s.openFilePreview);
 
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState("");
   const [type, setType] = useState("text_note");
   const [content, setContent] = useState("");
+
+  // Fetch draft files when projectId changes
+  useEffect(() => {
+    if (projectId) {
+      fetchDraftFiles(projectId);
+    }
+  }, [projectId, fetchDraftFiles]);
+
+  // Merge DB artifacts + filesystem drafts, deduplicate by name
+  const mergedDrafts = useMemo<MergedDraft[]>(() => {
+    const seen = new Set<string>();
+    const result: MergedDraft[] = [];
+
+    // DB artifacts first (higher priority)
+    for (const output of outputs) {
+      seen.add(output.name);
+      result.push({
+        id: output.id,
+        name: output.name,
+        type: output.type,
+        content: output.content,
+        summary: output.summary || undefined,
+        source: "db",
+        artifact: output,
+      });
+    }
+
+    // Filesystem drafts (skip if already seen by name)
+    for (const file of draftFiles) {
+      if (seen.has(file.name)) continue;
+      seen.add(file.name);
+      result.push({
+        id: `fs-${file.relativePath}`,
+        name: file.name,
+        type: "other",
+        content: file.content,
+        summary: `${(file.size / 1024).toFixed(1)} KB`,
+        source: "fs",
+        draftFile: file,
+      });
+    }
+
+    return result;
+  }, [outputs, draftFiles]);
 
   const handleAdd = async () => {
     if (!name.trim() || !content.trim()) return;
@@ -86,13 +141,13 @@ export function ContributionsTab({ projectId }: ContributionsTabProps) {
     });
   };
 
-  const handleOutputClick = (output: OutputArtifact) => {
+  const handleDraftClick = (draft: MergedDraft) => {
     openFilePreview({
-      id: output.id,
-      name: output.name,
+      id: draft.id,
+      name: draft.name,
       type: "draft",
-      content: output.content,
-      language: output.type === "code" ? "code" : undefined,
+      content: draft.content,
+      language: draft.type === "code" ? "code" : undefined,
     });
   };
 
@@ -213,25 +268,25 @@ export function ContributionsTab({ projectId }: ContributionsTabProps) {
 
         <ScrollArea className="flex-1">
           <div className="px-3 pb-3 space-y-1">
-            {outputs.length === 0 ? (
+            {mergedDrafts.length === 0 ? (
               <div className="text-center py-4 text-muted-foreground text-xs">
                 暂无产出
               </div>
             ) : (
-              outputs.map((output) => {
-                const Icon = outputTypeIcons[output.type] || File;
+              mergedDrafts.map((draft) => {
+                const Icon = outputTypeIcons[draft.type] || File;
                 return (
                   <div
-                    key={output.id}
+                    key={draft.id}
                     className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-accent/50 cursor-pointer group transition-colors"
-                    onClick={() => handleOutputClick(output)}
+                    onClick={() => handleDraftClick(draft)}
                   >
                     <Icon className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <div className="text-xs truncate">{output.name}</div>
-                      {output.summary && (
+                      <div className="text-xs truncate">{draft.name}</div>
+                      {draft.summary && (
                         <div className="text-[10px] text-muted-foreground truncate">
-                          {output.summary}
+                          {draft.summary}
                         </div>
                       )}
                     </div>
@@ -239,19 +294,23 @@ export function ContributionsTab({ projectId }: ContributionsTabProps) {
                       variant="outline"
                       className="text-[9px] px-1 py-0 shrink-0"
                     >
-                      {OUTPUT_TYPE_LABELS[output.type] || output.type}
+                      {draft.source === "db"
+                        ? OUTPUT_TYPE_LABELS[draft.type] || draft.type
+                        : "file"}
                     </Badge>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-5 w-5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        removeOutput(output.id);
-                      }}
-                    >
-                      <Trash2 className="h-2.5 w-2.5 text-muted-foreground" />
-                    </Button>
+                    {draft.source === "db" && draft.artifact && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-5 w-5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeOutput(draft.artifact!.id);
+                        }}
+                      >
+                        <Trash2 className="h-2.5 w-2.5 text-muted-foreground" />
+                      </Button>
+                    )}
                   </div>
                 );
               })

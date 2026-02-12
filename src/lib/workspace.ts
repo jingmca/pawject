@@ -24,6 +24,68 @@ export function getDraftDir(projectId: string): string {
   return path.join(getWorkspacePath(projectId), "draft");
 }
 
+export function getTaskDir(projectId: string, taskId: string): string {
+  return path.join(getWorkspacePath(projectId), "tasks", taskId);
+}
+
+export async function createTaskDir(
+  projectId: string,
+  taskId: string
+): Promise<string> {
+  const taskDir = getTaskDir(projectId, taskId);
+  await fs.mkdir(taskDir, { recursive: true });
+  return taskDir;
+}
+
+export interface DraftFileInfo {
+  name: string;
+  relativePath: string;
+  size: number;
+  content: string;
+  modifiedAt: Date;
+}
+
+export async function listDraftFilesDetailed(
+  projectId: string
+): Promise<DraftFileInfo[]> {
+  const draftDir = getDraftDir(projectId);
+  const results: DraftFileInfo[] = [];
+
+  async function scanDir(dir: string, prefix: string) {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === ".gitkeep") continue;
+      const fullPath = path.join(dir, entry.name);
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        await scanDir(fullPath, rel);
+      } else {
+        try {
+          const stat = await fs.stat(fullPath);
+          const content = await fs.readFile(fullPath, "utf-8");
+          results.push({
+            name: entry.name,
+            relativePath: rel,
+            size: stat.size,
+            content,
+            modifiedAt: stat.mtime,
+          });
+        } catch {
+          // skip unreadable files
+        }
+      }
+    }
+  }
+
+  await scanDir(draftDir, "");
+  return results;
+}
+
 export async function createWorkspace(projectId: string): Promise<string> {
   const wsPath = getWorkspacePath(projectId);
   const contextDir = getContextDir(projectId);

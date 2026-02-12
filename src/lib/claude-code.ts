@@ -53,6 +53,7 @@ export function claudeStream(params: {
   prompt: string;
   cwd: string;
   continueConversation?: boolean;
+  addDirs?: string[];
   callbacks: ClaudeStreamCallbacks;
 }): { process: ChildProcess; done: Promise<ClaudeResult> } {
   const args: string[] = [
@@ -62,6 +63,12 @@ export function claudeStream(params: {
     "--include-partial-messages",
     "--dangerously-skip-permissions",
   ];
+
+  if (params.addDirs) {
+    for (const dir of params.addDirs) {
+      args.push("--add-dir", dir);
+    }
+  }
 
   if (params.continueConversation) {
     args.push("-c");
@@ -165,12 +172,19 @@ export async function claudeOneShot(params: {
   cwd: string;
   continueConversation?: boolean;
   noSessionPersistence?: boolean;
+  addDirs?: string[];
 }): Promise<ClaudeResult> {
   const args: string[] = [
     "--print",
     "--output-format", "json",
     "--dangerously-skip-permissions",
   ];
+
+  if (params.addDirs) {
+    for (const dir of params.addDirs) {
+      args.push("--add-dir", dir);
+    }
+  }
 
   if (params.noSessionPersistence) {
     args.push("--no-session-persistence");

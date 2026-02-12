@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { executePeriodicRun, generateProgressUpdate } from "@/lib/agent";
-import { getWorkspacePath, commitChange } from "@/lib/workspace";
+import { getWorkspacePath, getContextDir, getDraftDir, createTaskDir, commitChange } from "@/lib/workspace";
 import type { ScheduleConfig } from "@/types";
 
 export async function checkAndRunScheduledTasks(): Promise<{
@@ -37,11 +37,17 @@ export async function checkAndRunScheduledTasks(): Promise<{
       const workspacePath =
         task.project.workspacePath || getWorkspacePath(task.projectId);
 
+      // Create task subdirectory
+      const taskDir = await createTaskDir(task.projectId, task.id);
+      const addDirs = [getContextDir(task.projectId), getDraftDir(task.projectId)];
+
       const response = await executePeriodicRun(
         task,
         task.project.context,
         task.project.instruction,
-        workspacePath
+        workspacePath,
+        addDirs,
+        taskDir
       );
 
       await prisma.message.create({
@@ -137,11 +143,17 @@ export async function checkAndRunScheduledTasks(): Promise<{
       const workspacePath =
         task.project.workspacePath || getWorkspacePath(task.projectId);
 
+      // Create task subdirectory
+      const taskDir = await createTaskDir(task.projectId, task.id);
+      const addDirs = [getContextDir(task.projectId), getDraftDir(task.projectId)];
+
       const response = await generateProgressUpdate(
         task,
         task.project.context,
         task.project.instruction,
-        workspacePath
+        workspacePath,
+        addDirs,
+        taskDir
       );
 
       await prisma.message.create({

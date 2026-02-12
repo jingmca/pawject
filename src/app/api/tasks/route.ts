@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { chat } from "@/lib/agent";
-import { getWorkspacePath, commitChange } from "@/lib/workspace";
+import { getWorkspacePath, getContextDir, getDraftDir, createTaskDir, commitChange } from "@/lib/workspace";
 import type { ScheduleConfig } from "@/types";
 import crypto from "node:crypto";
 
@@ -46,12 +46,18 @@ async function runInitialTaskAgent(
 
     const workspacePath = getWorkspacePath(projectId);
 
+    // Create task subdirectory
+    const taskDir = await createTaskDir(projectId, taskId);
+    const addDirs = [getContextDir(projectId), getDraftDir(projectId)];
+
     const response = await chat({
       task,
       userMessage: userMsg,
       sharedContext: project.context,
       projectInstruction: project.instruction,
       workspacePath,
+      addDirs,
+      taskDir,
     });
 
     // Save agent response
@@ -88,11 +94,16 @@ async function runInitialTaskAgent(
       }
     }
 
-    // Update status if agent suggested a change
+    // Update status if agent suggested a change, or auto-complete one_time tasks
     if (response.taskStatusChange) {
       await prisma.task.update({
         where: { id: taskId },
         data: { status: response.taskStatusChange },
+      });
+    } else if (taskType === "one_time") {
+      await prisma.task.update({
+        where: { id: taskId },
+        data: { status: "completed" },
       });
     }
 

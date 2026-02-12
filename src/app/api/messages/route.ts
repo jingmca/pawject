@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { chatStream, parseClaudeResult, ensureClaudeMd } from "@/lib/agent";
-import { commitChange, getWorkspacePath } from "@/lib/workspace";
+import { commitChange, getWorkspacePath, getContextDir, getDraftDir, createTaskDir } from "@/lib/workspace";
 
 export async function GET(request: NextRequest) {
   const taskId = request.nextUrl.searchParams.get("taskId");
@@ -58,13 +58,18 @@ export async function POST(request: Request) {
 
   const workspacePath = getWorkspacePath(task.projectId);
 
+  // Create task subdirectory
+  const taskDir = await createTaskDir(task.projectId, taskId);
+  const addDirs = [getContextDir(task.projectId), getDraftDir(task.projectId)];
+
   // Write CLAUDE.md with system prompt before starting the CLI
   await ensureClaudeMd(
     task,
     task.project.instruction,
     task.project.context,
     workspacePath,
-    task.projectId
+    task.projectId,
+    taskDir
   );
 
   // Check if agent has previously replied in this task (determines -c flag)
@@ -99,6 +104,8 @@ export async function POST(request: Request) {
           projectInstruction: task.project.instruction,
           workspacePath,
           hasAgentReplied,
+          addDirs,
+          taskDir,
           callbacks: {
             onToken: (text) => {
               safeEnqueue(
@@ -155,11 +162,14 @@ export async function POST(request: Request) {
                   }
                 }
 
-                // Handle status change (askUser -> awaiting_input)
-                if (agentResponse.taskStatusChange) {
+                // Handle status change (askUser -> awaiting_input), or auto-complete one_time tasks
+                const effectiveStatus = agentResponse.taskStatusChange
+                  || (task.type === "one_time" ? "completed" : undefined);
+
+                if (effectiveStatus) {
                   await prisma.task.update({
                     where: { id: taskId },
-                    data: { status: agentResponse.taskStatusChange },
+                    data: { status: effectiveStatus },
                   });
                 }
 
@@ -183,7 +193,7 @@ export async function POST(request: Request) {
                     `data: ${JSON.stringify({
                       type: "done",
                       messageId: agentMessage.id,
-                      taskStatusChange: agentResponse.taskStatusChange,
+                      taskStatusChange: effectiveStatus || agentResponse.taskStatusChange,
                       artifacts: agentResponse.artifacts,
                       askUser: agentResponse.askUser,
                     })}\n\n`
